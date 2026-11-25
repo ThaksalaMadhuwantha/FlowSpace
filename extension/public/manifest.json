@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "FlowSpace — Quick Order & Task Side Panel",
+  "version": "1.0.0",
+  "description": "Capture client orders from anywhere, manage tasks in a side panel, and sync with FlowSpace.",
+  "permissions": [
+    "sidePanel",
+    "contextMenus",
+    "storage",
+    "identity"
+  ],
+  "host_permissions": [
+    "https://*.supabase.co/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "action": {
+    "default_title": "Open FlowSpace Side Panel",
+    "default_icon": {
+      "16": "logo.svg",
+      "48": "logo.svg",
+      "128": "logo.svg"
+    }
+  },
+  "icons": {
+    "16": "logo.svg",
+    "48": "logo.svg",
+    "128": "logo.svg"
+  }
+}

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="flowGrad" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#06B6D4" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="32" fill="url(#flowGrad)" />
+  <path d="M40 44H88C91.3137 44 94 46.6863 94 50C94 53.3137 91.3137 56 88 56H52V64H78C81.3137 64 84 66.6863 84 70C84 73.3137 81.3137 76 78 76H52V88C52 91.3137 49.3137 94 46 94C42.6863 94 40 91.3137 40 88V44Z" fill="white" />
+  <circle cx="84" cy="86" r="10" fill="#FBBF24" />
+</svg>
