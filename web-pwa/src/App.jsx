@@ -3,7 +3,7 @@ import { supabase } from './supabaseClient'
 import {
   Plus, Users, Tag, LogOut, Trash2, LayoutGrid, Search, Building2,
   Bell, CheckCircle2, AlertTriangle, DollarSign, Briefcase, Edit3, Check,
-  ChevronLeft, ChevronRight, X, Wallet
+  ChevronLeft, ChevronRight, X, Wallet, Hash
 } from 'lucide-react'
 
 const DEFAULT_CATEGORIES = [
@@ -11,6 +11,7 @@ const DEFAULT_CATEGORIES = [
   { name: 'Flyer', color: '#32ADE6' },
   { name: 'FB Post', color: '#5E5CE6' },
   { name: 'Logo', color: '#FF9F0A' },
+  { name: 'Service Letter', color: '#BF5AF2' },
 ]
 
 const STATUS_CONFIG = {
@@ -29,10 +30,27 @@ const CLIENT_PAYMENT_CONFIG = {
 
 function getCategoryPrefix(catName) {
   if (!catName) return 'TASK'
+  const lower = catName.trim().toLowerCase()
+  if (lower.includes('service') || lower === 'sl') return 'SL'
   const firstWord = catName.trim().split(/\s+/)[0]
   return firstWord.length <= 3
     ? firstWord.toUpperCase()
     : firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase()
+}
+
+function getNextSequenceCode(prefix, existingCodes, countFallback) {
+  const regex = new RegExp(`^${prefix}_(\\d+)`, 'i')
+  let maxNum = 0
+  existingCodes.forEach(code => {
+    if (!code) return
+    const match = code.trim().match(regex)
+    if (match) {
+      const num = parseInt(match[1], 10)
+      if (!isNaN(num) && num > maxNum) maxNum = num
+    }
+  })
+  const nextNum = Math.max(maxNum, countFallback) + 1
+  return `${prefix}_${String(nextNum).padStart(2, '0')}`
 }
 
 export default function App() {
@@ -282,14 +300,35 @@ export default function App() {
     })
   }, [employees, userEmail, userId, allProfiles])
 
-  // Auto-generate next order code for the selected category (e.g., CV_01, CV_02)
+  // Helper: Get next employee-specific sequence code for a given employee & category
+  const getNextEmployeeCode = useCallback((empId, catId) => {
+    if (!empId || !catId) return null
+    const cat = myOwnCategories.find(c => c.id === catId)
+    const prefix = getCategoryPrefix(cat?.name)
+    const empCatOrders = myWorkspaceOrders.filter(o => o.assigned_to === empId && o.category_id === catId)
+    return getNextSequenceCode(
+      prefix,
+      empCatOrders.map(o => o.employee_order_code),
+      empCatOrders.length
+    )
+  }, [myOwnCategories, myWorkspaceOrders])
+
+  // Auto-generate next company order code (scans highest existing CV_XXX number accurately)
   const autoBaseOrderName = useMemo(() => {
     const selectedCat = myOwnCategories.find(c => c.id === categoryId)
     const prefix = getCategoryPrefix(selectedCat?.name)
-    const countInCat = myWorkspaceOrders.filter(o => o.category_id === categoryId).length
-    const nextNum = String(countInCat + 1).padStart(2, '0')
-    return `${prefix}_${nextNum}`
+    const catOrders = myWorkspaceOrders.filter(o => o.category_id === categoryId)
+    return getNextSequenceCode(
+      prefix,
+      catOrders.map(o => o.title),
+      catOrders.length
+    )
   }, [categoryId, myOwnCategories, myWorkspaceOrders])
+
+  const previewEmployeeOrderCode = useMemo(() => {
+    if (!assignedTo || !categoryId) return null
+    return getNextEmployeeCode(assignedTo, categoryId)
+  }, [assignedTo, categoryId, getNextEmployeeCode])
 
   const finalGeneratedTitle = titleSuffix.trim()
     ? `${autoBaseOrderName} (${titleSuffix.trim()})`
@@ -299,12 +338,15 @@ export default function App() {
   const handleAddOrder = async (e) => {
     e.preventDefault()
 
+    const empSeqCode = assignedTo ? getNextEmployeeCode(assignedTo, categoryId) : null
+
     const { data: insertedOrder, error } = await supabase.from('orders').insert([{
       user_id: userId,
       title: finalGeneratedTitle,
       client_name: clientName.trim() || null,
       category_id: categoryId || null,
       assigned_to: assignedTo || null,
+      employee_order_code: empSeqCode,
       price: price ? parseFloat(price) : 0,
       client_payment_status: clientPaymentStatus,
       employee_fee: employeeFee ? parseFloat(employeeFee) : 0,
@@ -320,8 +362,8 @@ export default function App() {
         if (emp?.email) {
           await sendNotification({
             recipientEmail: emp.email,
-            title: `New Order Assigned: ${finalGeneratedTitle}`,
-            message: `${profile?.company_name || 'Owner'} assigned a new task to you.`,
+            title: `New Order Assigned: ${empSeqCode || finalGeneratedTitle}`,
+            message: `${profile?.company_name || 'Owner'} assigned ${empSeqCode || ''} (${finalGeneratedTitle}) to you.`,
             orderId: insertedOrder.id
           })
         }
@@ -359,8 +401,8 @@ export default function App() {
       if (ownerProf?.email) {
         await sendNotification({
           recipientEmail: ownerProf.email,
-          title: `Order Completed: ${order.title}`,
-          message: `${userEmail} marked "${order.title}" as Completed.`,
+          title: `Order Completed: ${order.employee_order_code || order.title}`,
+          message: `${userEmail} marked "${order.employee_order_code ? `${order.employee_order_code} (${order.title})` : order.title}" as Completed.`,
           orderId: order.id
         })
       }
@@ -384,7 +426,7 @@ export default function App() {
     if (emp?.email) {
       await sendNotification({
         recipientEmail: emp.email,
-        title: `Update Requested: ${revisionModalOrder.title}`,
+        title: `Update Requested: ${revisionModalOrder.employee_order_code || revisionModalOrder.title}`,
         message: noteText,
         orderId: revisionModalOrder.id
       })
@@ -408,7 +450,7 @@ export default function App() {
           title: nextPayment === 'paid'
             ? `Payment Sent: Rs. ${order.employee_fee || 0}`
             : `Payment Status Updated: Unpaid`,
-          message: `${profile?.company_name || 'Company'} marked "${order.title}" as ${nextPayment.toUpperCase()}.`,
+          message: `${profile?.company_name || 'Company'} marked "${order.employee_order_code || order.title}" as ${nextPayment.toUpperCase()}.`,
           orderId: order.id
         })
       }
@@ -417,16 +459,21 @@ export default function App() {
     fetchOrders()
   }
 
-  // Re-assign order
+  // Re-assign order & calculate employee's next sequence code
   const updateOrderAssignee = async (order, empId) => {
-    await supabase.from('orders').update({ assigned_to: empId || null }).eq('id', order.id)
+    const newEmpCode = empId ? getNextEmployeeCode(empId, order.category_id) : null
+    await supabase.from('orders').update({
+      assigned_to: empId || null,
+      employee_order_code: newEmpCode
+    }).eq('id', order.id)
+
     if (empId) {
       const emp = myTeamMembers.find(m => m.id === empId)
       if (emp?.email) {
         await sendNotification({
           recipientEmail: emp.email,
-          title: `Task Assigned: ${order.title}`,
-          message: `${profile?.company_name || 'Owner'} assigned "${order.title}" to you.`,
+          title: `Task Assigned: ${newEmpCode || order.title}`,
+          message: `${profile?.company_name || 'Owner'} assigned ${newEmpCode || ''} (${order.title}) to you.`,
           orderId: order.id
         })
       }
@@ -548,12 +595,32 @@ export default function App() {
     if (employeeFilter !== 'all' && employeeFilter !== 'me' && o.assigned_to !== employeeFilter) return false
     if (paymentFilter !== 'all' && o.payment_status !== paymentFilter) return false
     if (clientPayFilter !== 'all' && (o.client_payment_status || 'unpaid') !== clientPayFilter) return false
-    if (searchQuery && !o.title.toLowerCase().includes(searchQuery.toLowerCase()) &&
-        !(o.client_name || '').toLowerCase().includes(searchQuery.toLowerCase())) return false
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      const matchTitle = o.title.toLowerCase().includes(q)
+      const matchClient = (o.client_name || '').toLowerCase().includes(q)
+      const matchEmpCode = (o.employee_order_code || '').toLowerCase().includes(q)
+      if (!matchTitle && !matchClient && !matchEmpCode) return false
+    }
     return true
   })
 
+  // Company Financial Calculations
   const myActiveOrdersCount = myWorkspaceOrders.filter(o => o.status !== 'done').length
+  const totalCompanyCollected = myWorkspaceOrders.reduce((sum, o) => {
+    const fee = Number(o.price || 0)
+    const payStatus = o.client_payment_status || 'unpaid'
+    if (payStatus === 'full_paid') return sum + fee
+    if (payStatus === 'half_paid') return sum + fee / 2
+    return sum
+  }, 0)
+
+  const totalStaffExpenses = myWorkspaceOrders
+    .filter(o => o.assigned_to)
+    .reduce((sum, o) => sum + Number(o.employee_fee || 0), 0)
+
+  const netCompanyProfit = totalCompanyCollected - totalStaffExpenses
+
   const totalUnpaidToTeam = myWorkspaceOrders
     .filter(o => o.assigned_to && o.payment_status !== 'paid')
     .reduce((sum, o) => sum + Number(o.employee_fee || 0), 0)
@@ -738,7 +805,7 @@ export default function App() {
                     {profile?.company_name || 'My Studio'}
                   </p>
                   <p className="text-[14px] text-white/55 mt-2.5 leading-relaxed">
-                    Create auto-numbered orders, track client payments (Half / Full), and manage staff payouts.
+                    Create auto-numbered orders, track employee order sequences, and manage studio revenue & payouts.
                   </p>
                 </div>
               </div>
@@ -749,7 +816,7 @@ export default function App() {
                     <strong className="text-white font-semibold">{myActiveOrdersCount}</strong> Active
                   </span>
                   <span className="text-white/60">
-                    <strong className="text-[#FF9F0A] font-semibold">Rs. {totalUnpaidToTeam.toLocaleString()}</strong> Due
+                    <strong className="text-[#30D158] font-semibold">Rs. {netCompanyProfit.toLocaleString()}</strong> Profit
                   </span>
                 </div>
                 <span className="w-8 h-8 rounded-full bg-white/[0.06] group-hover:bg-[#0A84FF] text-white/70 group-hover:text-white flex items-center justify-center transition">
@@ -789,7 +856,7 @@ export default function App() {
                     {employerCompanies.length} Connected {employerCompanies.length === 1 ? 'Company' : 'Companies'}
                   </p>
                   <p className="text-[14px] text-white/55 mt-2.5 leading-relaxed">
-                    View orders assigned to you by companies, check update alerts, and track your total earnings.
+                    View your personal order sequence numbers, check update alerts, and track your total earnings.
                   </p>
                 </div>
               </div>
@@ -859,31 +926,44 @@ export default function App() {
             </div>
 
             <div className="text-[13px] text-white/50">
-              Visible to employees under <strong className="text-white">{profile?.company_name}</strong>
+              Total Orders: <strong className="text-white">{myWorkspaceOrders.length}</strong> · Completed: <strong className="text-[#30D158]">{myWorkspaceOrders.filter(o => o.status === 'done').length}</strong>
             </div>
           </div>
 
-          {/* Summary Grid */}
+          {/* Financial & Orders Summary Grid */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
             <div className="bg-[#1C1C1E] border border-white/[0.07] rounded-[22px] p-4">
-              <div className="text-white/50 text-[12px] font-medium">Active Orders</div>
-              <div className="text-[28px] font-bold tracking-tight text-white mt-0.5">{myActiveOrdersCount}</div>
+              <div className="text-white/50 text-[12px] font-medium">Total Revenue Collected</div>
+              <div className="text-[24px] sm:text-[26px] font-bold tracking-tight text-[#32ADE6] mt-0.5">
+                Rs. {totalCompanyCollected.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-white/40 mt-0.5">From paid & half-paid orders</div>
             </div>
+
             <div className="bg-[#1C1C1E] border border-white/[0.07] rounded-[22px] p-4">
-              <div className="text-white/50 text-[12px] font-medium">Completed</div>
-              <div className="text-[28px] font-bold tracking-tight text-[#30D158] mt-0.5">
-                {myWorkspaceOrders.filter(o => o.status === 'done').length}
+              <div className="text-white/50 text-[12px] font-medium">Net Company Profit</div>
+              <div className="text-[24px] sm:text-[26px] font-bold tracking-tight text-[#30D158] mt-0.5">
+                Rs. {netCompanyProfit.toLocaleString()}
+              </div>
+              <div className="text-[11px] text-white/40 mt-0.5">
+                After Rs. {totalStaffExpenses.toLocaleString()} staff fees
               </div>
             </div>
+
             <div className="bg-[#1C1C1E] border border-white/[0.07] rounded-[22px] p-4">
               <div className="text-white/50 text-[12px] font-medium">Pending Staff Payouts</div>
-              <div className="text-[28px] font-bold tracking-tight text-[#FF9F0A] mt-0.5">
+              <div className="text-[24px] sm:text-[26px] font-bold tracking-tight text-[#FF9F0A] mt-0.5">
                 Rs. {totalUnpaidToTeam.toLocaleString()}
               </div>
+              <div className="text-[11px] text-white/40 mt-0.5">Unpaid team balance</div>
             </div>
+
             <div className="bg-[#1C1C1E] border border-white/[0.07] rounded-[22px] p-4">
-              <div className="text-white/50 text-[12px] font-medium">Team Members</div>
-              <div className="text-[28px] font-bold tracking-tight text-[#32ADE6] mt-0.5">{myTeamMembers.length}</div>
+              <div className="text-white/50 text-[12px] font-medium">Active / Postponed</div>
+              <div className="text-[24px] sm:text-[26px] font-bold tracking-tight text-white mt-0.5">
+                {myActiveOrdersCount}
+              </div>
+              <div className="text-[11px] text-white/40 mt-0.5">{myTeamMembers.length} Team Members</div>
             </div>
           </div>
 
@@ -891,7 +971,7 @@ export default function App() {
           <div className="inline-flex bg-[#1C1C1E] p-1 rounded-2xl border border-white/[0.07]">
             {[
               { id: 'orders', label: 'Orders & Payments', icon: LayoutGrid },
-              { id: 'team', label: 'Team & Payroll', icon: Users },
+              { id: 'team', label: 'Team & Sequence Dashboard', icon: Users },
               { id: 'categories', label: 'Categories', icon: Tag },
             ].map(tab => {
               const Icon = tab.icon
@@ -918,9 +998,16 @@ export default function App() {
                   <h2 className="text-[15px] font-semibold text-white flex items-center gap-2">
                     <Plus className="w-4 h-4 text-[#0A84FF]" /> New Order
                   </h2>
-                  <span className="text-[12px] bg-[#0A84FF]/15 text-[#0A84FF] px-3.5 py-1 rounded-full font-medium">
-                    Next Order ID: <strong>{finalGeneratedTitle}</strong>
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[12px] bg-[#0A84FF]/15 text-[#0A84FF] px-3.5 py-1 rounded-full font-medium">
+                      Company ID: <strong>{finalGeneratedTitle}</strong>
+                    </span>
+                    {previewEmployeeOrderCode && (
+                      <span className="text-[12px] bg-[#30D158]/15 text-[#30D158] px-3.5 py-1 rounded-full font-medium">
+                        Employee ID: <strong>{previewEmployeeOrderCode}</strong>
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -942,7 +1029,7 @@ export default function App() {
                     </span>
                     <input
                       type="text"
-                      placeholder="Optional note (e.g. from cv_01)"
+                      placeholder="Optional note (e.g. from CV_102)"
                       value={titleSuffix}
                       onChange={(e) => setTitleSuffix(e.target.value)}
                       className="flex-1 bg-transparent px-3.5 py-2.5 text-[14px] text-white placeholder:text-white/35 focus:outline-none"
@@ -1031,7 +1118,7 @@ export default function App() {
                   <Search className="w-4 h-4 text-white/40 absolute left-3.5 top-3" />
                   <input
                     type="text"
-                    placeholder="Search orders or clients..."
+                    placeholder="Search Company ID, Employee ID (e.g. CV_20) or client..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full bg-[#1C1C1E] border border-white/[0.08] rounded-xl pl-10 pr-4 py-2 text-[14px] text-white placeholder:text-white/35 focus:outline-none focus:border-[#0A84FF]"
@@ -1094,6 +1181,7 @@ export default function App() {
                 ) : (
                   filteredOwnerOrders.map(order => {
                     const category = categories.find(c => c.id === order.category_id)
+                    const assignee = myTeamMembers.find(e => e.id === order.assigned_to)
                     const clientPayKey = order.client_payment_status || 'unpaid'
                     return (
                       <div
@@ -1118,6 +1206,11 @@ export default function App() {
                               </span>
                             )}
                             <h3 className="font-semibold text-[16px] text-white">{order.title}</h3>
+                            {assignee && order.employee_order_code && (
+                              <span className="text-[11px] font-semibold bg-[#32ADE6]/15 text-[#32ADE6] border border-[#32ADE6]/25 px-2.5 py-0.5 rounded-full">
+                                {assignee.name}: {order.employee_order_code}
+                              </span>
+                            )}
                           </div>
 
                           <div className="flex flex-wrap items-center gap-4 text-[13px] text-white/55">
@@ -1135,7 +1228,7 @@ export default function App() {
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
-                          {/* Client Payment Toggle Pill: Unpaid -> Half Paid -> Full Paid */}
+                          {/* Client Payment Toggle Pill */}
                           <button
                             onClick={() => cycleClientPaymentStatus(order)}
                             className={`flex items-center gap-1 px-3 py-1.5 rounded-xl text-[12px] font-semibold border ios-press cursor-pointer ${CLIENT_PAYMENT_CONFIG[clientPayKey]?.color}`}
@@ -1211,7 +1304,7 @@ export default function App() {
             </div>
           )}
 
-          {/* OWNER TAB 2: TEAM & PAYROLL SUMMARY */}
+          {/* OWNER TAB 2: TEAM & SEQUENCE DASHBOARD */}
           {ownerTab === 'team' && (
             <div className="space-y-6">
               <form onSubmit={handleAddEmployee} className="bg-[#1C1C1E] border border-white/[0.08] rounded-[24px] p-5 grid grid-cols-1 sm:grid-cols-4 gap-3">
@@ -1246,7 +1339,7 @@ export default function App() {
                 </button>
               </form>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {myTeamMembers.map(emp => {
                   const empOrders = myWorkspaceOrders.filter(o => o.assigned_to === emp.id)
                   const activeJobs = empOrders.filter(o => o.status !== 'done').length
@@ -1258,11 +1351,19 @@ export default function App() {
                     .filter(o => o.payment_status === 'paid')
                     .reduce((sum, o) => sum + Number(o.employee_fee || 0), 0)
 
+                  const catStats = myOwnCategories.map(cat => {
+                    const count = empOrders.filter(o => o.category_id === cat.id).length
+                    const nextCode = getNextEmployeeCode(emp.id, cat.id)
+                    return { cat, count, nextCode }
+                  }).filter(item => item.count > 0)
+
+                  const recentEmpOrders = empOrders.slice(0, 4)
+
                   return (
-                    <div key={emp.id} className="bg-[#1C1C1E] border border-white/[0.08] rounded-[22px] p-5 space-y-3.5">
+                    <div key={emp.id} className="bg-[#1C1C1E] border border-white/[0.08] rounded-[24px] p-5 space-y-4">
                       <div className="flex items-start justify-between">
                         <div>
-                          <h3 className="font-semibold text-white text-[17px]">{emp.name}</h3>
+                          <h3 className="font-semibold text-white text-[18px]">{emp.name}</h3>
                           <p className="text-[13px] text-white/50">{emp.role}</p>
                           <p className="text-[12px] text-[#0A84FF] mt-0.5">{emp.email}</p>
                         </div>
@@ -1274,17 +1375,62 @@ export default function App() {
                         </button>
                       </div>
 
-                      <div className="pt-3 border-t border-white/[0.08] grid grid-cols-2 gap-2 text-[13px]">
+                      <div className="pt-3 border-t border-white/[0.08] grid grid-cols-2 gap-3 text-[13px]">
                         <div>
                           <span className="text-white/45 block text-[11px]">Workload</span>
                           <strong className="text-[#32ADE6]">{activeJobs} active</strong> · <span className="text-[#30D158]">{doneJobs} done</span>
                         </div>
                         <div>
-                          <span className="text-white/45 block text-[11px]">Unpaid Due</span>
-                          <strong className="text-[#FF9F0A]">Rs. {unpaidBalance.toLocaleString()}</strong>
-                          <span className="text-white/40 block text-[11px]">Paid: Rs. {paidTotal.toLocaleString()}</span>
+                          <span className="text-white/45 block text-[11px]">Payments</span>
+                          <strong className="text-[#FF9F0A]">Due: Rs. {unpaidBalance.toLocaleString()}</strong>
+                          <span className="text-white/45 block text-[11px]">Paid: Rs. {paidTotal.toLocaleString()}</span>
                         </div>
                       </div>
+
+                      <div className="pt-3 border-t border-white/[0.08] space-y-2">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-white/45 flex items-center gap-1">
+                          <Hash className="w-3 h-3 text-[#32ADE6]" /> Category Order Sequences
+                        </span>
+                        {catStats.length === 0 ? (
+                          <p className="text-[12px] text-white/35">No category orders assigned yet.</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {catStats.map(({ cat, count, nextCode }) => (
+                              <div
+                                key={cat.id}
+                                className="bg-[#2C2C2E] border border-white/[0.06] rounded-xl px-3 py-1.5 text-[12px] flex items-center gap-2"
+                              >
+                                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: cat.color }} />
+                                <span className="text-white/80 font-medium">{cat.name}:</span>
+                                <strong className="text-white">{count}</strong>
+                                <span className="text-[11px] text-[#30D158] font-semibold">
+                                  (Next: {nextCode})
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {recentEmpOrders.length > 0 && (
+                        <div className="pt-3 border-t border-white/[0.08] space-y-1.5">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-white/45 block">
+                            Recent Assigned Mapping
+                          </span>
+                          <div className="space-y-1">
+                            {recentEmpOrders.map(o => (
+                              <div key={o.id} className="flex items-center justify-between text-[12px] bg-black/30 rounded-lg px-2.5 py-1.5">
+                                <span className="text-[#32ADE6] font-semibold">
+                                  {o.employee_order_code || '—'}
+                                </span>
+                                <span className="text-white/50 truncate max-w-[200px]">
+                                  Company: {o.title}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )
                 })}
@@ -1455,7 +1601,7 @@ export default function App() {
                       order.status === 'revision'
                         ? 'border-[#FF453A]/50'
                         : order.status === 'done'
-                        ? 'border-white/[0.04] opacity-70'
+                        ? 'border-white/[0.04] opacity-75'
                         : 'border-white/[0.07]'
                     }`}
                   >
@@ -1472,7 +1618,14 @@ export default function App() {
                             {category.name}
                           </span>
                         )}
-                        <h3 className="font-semibold text-[16px] text-white">{order.title}</h3>
+                        <h3 className="font-bold text-[17px] text-white">
+                          {order.employee_order_code || order.title}
+                        </h3>
+                        {order.employee_order_code && (
+                          <span className="text-[11px] font-medium bg-white/[0.06] text-white/55 px-2.5 py-0.5 rounded-full">
+                            Company Ref: {order.title}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-4 text-[13px] text-white/55">
@@ -1524,7 +1677,7 @@ export default function App() {
             className="bg-[#1C1C1E] border border-white/15 rounded-[28px] max-w-md w-full p-6 space-y-4 shadow-2xl animate-ios-pop"
           >
             <h3 className="text-[18px] font-bold text-white tracking-tight">
-              Request Update · {revisionModalOrder.title}
+              Request Update · {revisionModalOrder.employee_order_code || revisionModalOrder.title}
             </h3>
             <p className="text-[13px] text-white/55">
               This marks the order as Update Needed and sends an instant alert to the assigned employee.

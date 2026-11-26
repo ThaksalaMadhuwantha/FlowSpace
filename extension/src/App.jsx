@@ -11,6 +11,7 @@ const DEFAULT_CATEGORIES = [
   { name: 'Flyer', color: '#32ADE6' },
   { name: 'FB Post', color: '#5E5CE6' },
   { name: 'Logo', color: '#FF9F0A' },
+  { name: 'Service Letter', color: '#BF5AF2' },
 ]
 
 const STATUS_CONFIG = {
@@ -29,10 +30,27 @@ const CLIENT_PAYMENT_CONFIG = {
 
 function getCategoryPrefix(catName) {
   if (!catName) return 'TASK'
+  const lower = catName.trim().toLowerCase()
+  if (lower.includes('service') || lower === 'sl') return 'SL'
   const firstWord = catName.trim().split(/\s+/)[0]
   return firstWord.length <= 3
     ? firstWord.toUpperCase()
     : firstWord.charAt(0).toUpperCase() + firstWord.slice(1).toLowerCase()
+}
+
+function getNextSequenceCode(prefix, existingCodes, countFallback) {
+  const regex = new RegExp(`^${prefix}_(\\d+)`, 'i')
+  let maxNum = 0
+  existingCodes.forEach(code => {
+    if (!code) return
+    const match = code.trim().match(regex)
+    if (match) {
+      const num = parseInt(match[1], 10)
+      if (!isNaN(num) && num > maxNum) maxNum = num
+    }
+  })
+  const nextNum = Math.max(maxNum, countFallback) + 1
+  return `${prefix}_${String(nextNum).padStart(2, '0')}`
 }
 
 export default function App() {
@@ -273,14 +291,35 @@ export default function App() {
     })
   }, [employees, userEmail, userId, allProfiles])
 
-  // Auto-generate next order title
+  // Helper: Get next employee-specific sequence code for a given employee & category
+  const getNextEmployeeCode = useCallback((empId, catId) => {
+    if (!empId || !catId) return null
+    const cat = myOwnCategories.find(c => c.id === catId)
+    const prefix = getCategoryPrefix(cat?.name)
+    const empCatOrders = myWorkspaceOrders.filter(o => o.assigned_to === empId && o.category_id === catId)
+    return getNextSequenceCode(
+      prefix,
+      empCatOrders.map(o => o.employee_order_code),
+      empCatOrders.length
+    )
+  }, [myOwnCategories, myWorkspaceOrders])
+
+  // Auto-generate next company order code (scans highest existing CV_XXX number accurately)
   const autoBaseOrderName = useMemo(() => {
     const selectedCat = myOwnCategories.find(c => c.id === categoryId)
     const prefix = getCategoryPrefix(selectedCat?.name)
-    const countInCat = myWorkspaceOrders.filter(o => o.category_id === categoryId).length
-    const nextNum = String(countInCat + 1).padStart(2, '0')
-    return `${prefix}_${nextNum}`
+    const catOrders = myWorkspaceOrders.filter(o => o.category_id === categoryId)
+    return getNextSequenceCode(
+      prefix,
+      catOrders.map(o => o.title),
+      catOrders.length
+    )
   }, [categoryId, myOwnCategories, myWorkspaceOrders])
+
+  const previewEmployeeOrderCode = useMemo(() => {
+    if (!assignedTo || !categoryId) return null
+    return getNextEmployeeCode(assignedTo, categoryId)
+  }, [assignedTo, categoryId, getNextEmployeeCode])
 
   const finalGeneratedTitle = titleSuffix.trim()
     ? `${autoBaseOrderName} (${titleSuffix.trim()})`
@@ -290,12 +329,15 @@ export default function App() {
   const handleAddOrder = async (e) => {
     e.preventDefault()
 
+    const empSeqCode = assignedTo ? getNextEmployeeCode(assignedTo, categoryId) : null
+
     const { data: insertedOrder, error } = await supabase.from('orders').insert([{
       user_id: userId,
       title: finalGeneratedTitle,
       client_name: clientName.trim() || null,
       category_id: categoryId || null,
       assigned_to: assignedTo || null,
+      employee_order_code: empSeqCode,
       price: price ? parseFloat(price) : 0,
       client_payment_status: clientPaymentStatus,
       employee_fee: employeeFee ? parseFloat(employeeFee) : 0,
@@ -311,8 +353,8 @@ export default function App() {
         if (emp?.email) {
           await sendNotification({
             recipientEmail: emp.email,
-            title: `New Order: ${finalGeneratedTitle}`,
-            message: `${profile?.company_name || 'Owner'} assigned a new order to you.`,
+            title: `New Order: ${empSeqCode || finalGeneratedTitle}`,
+            message: `${profile?.company_name || 'Owner'} assigned ${empSeqCode || ''} (${finalGeneratedTitle}) to you.`,
             orderId: insertedOrder.id
           })
         }
@@ -348,8 +390,8 @@ export default function App() {
       if (ownerProf?.email) {
         await sendNotification({
           recipientEmail: ownerProf.email,
-          title: `Completed: ${order.title}`,
-          message: `${userEmail} marked "${order.title}" as Completed.`,
+          title: `Completed: ${order.employee_order_code || order.title}`,
+          message: `${userEmail} marked "${order.employee_order_code ? `${order.employee_order_code} (${order.title})` : order.title}" as Completed.`,
           orderId: order.id
         })
       }
@@ -371,7 +413,7 @@ export default function App() {
     if (emp?.email) {
       await sendNotification({
         recipientEmail: emp.email,
-        title: `Update Requested: ${revisionModalOrder.title}`,
+        title: `Update Requested: ${revisionModalOrder.employee_order_code || revisionModalOrder.title}`,
         message: noteText,
         orderId: revisionModalOrder.id
       })
@@ -395,7 +437,7 @@ export default function App() {
           title: nextPayment === 'paid'
             ? `Payment Sent: Rs. ${order.employee_fee || 0}`
             : `Payment Status: Unpaid`,
-          message: `${profile?.company_name || 'Company'} marked "${order.title}" as ${nextPayment.toUpperCase()}.`,
+          message: `${profile?.company_name || 'Company'} marked "${order.employee_order_code || order.title}" as ${nextPayment.toUpperCase()}.`,
           orderId: order.id
         })
       }
@@ -459,16 +501,33 @@ export default function App() {
     )
   }
 
-  // Stats & filtered lists
+  // Stats & Financial Calculations
   const myActiveOrdersCount = myWorkspaceOrders.filter(o => o.status !== 'done').length
+  const totalCompanyCollected = myWorkspaceOrders.reduce((sum, o) => {
+    const fee = Number(o.price || 0)
+    const payStatus = o.client_payment_status || 'unpaid'
+    if (payStatus === 'full_paid') return sum + fee
+    if (payStatus === 'half_paid') return sum + fee / 2
+    return sum
+  }, 0)
+  const totalStaffExpenses = myWorkspaceOrders
+    .filter(o => o.assigned_to)
+    .reduce((sum, o) => sum + Number(o.employee_fee || 0), 0)
+  const netCompanyProfit = totalCompanyCollected - totalStaffExpenses
+
   const totalUnpaidToTeam = myWorkspaceOrders
     .filter(o => o.assigned_to && o.payment_status !== 'paid')
     .reduce((sum, o) => sum + Number(o.employee_fee || 0), 0)
 
   const filteredOwnerOrders = myWorkspaceOrders.filter(o => {
     if (statusFilter !== 'all' && o.status !== statusFilter) return false
-    if (searchQuery && !o.title.toLowerCase().includes(searchQuery.toLowerCase()) &&
-        !(o.client_name || '').toLowerCase().includes(searchQuery.toLowerCase())) return false
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      const matchTitle = o.title.toLowerCase().includes(q)
+      const matchClient = (o.client_name || '').toLowerCase().includes(q)
+      const matchEmpCode = (o.employee_order_code || '').toLowerCase().includes(q)
+      if (!matchTitle && !matchClient && !matchEmpCode) return false
+    }
     return true
   })
 
@@ -628,14 +687,14 @@ export default function App() {
               <h2 className="text-[18px] font-bold text-white">My Orders</h2>
               <p className="text-[12px] text-[#0A84FF] font-medium">{profile?.company_name || 'My Studio'}</p>
               <p className="text-[12px] text-white/55 mt-1.5 leading-relaxed">
-                Create auto-numbered orders, track client Half/Full payments & manage staff payouts.
+                Create auto-numbered orders, track client payments & view studio profit.
               </p>
             </div>
 
             <div className="pt-3 border-t border-white/[0.08] flex items-center justify-between text-[12px]">
               <div className="flex gap-3">
                 <span className="text-white/60"><strong className="text-white">{myActiveOrdersCount}</strong> Active</span>
-                <span className="text-white/60"><strong className="text-[#FF9F0A]">Rs. {totalUnpaidToTeam.toLocaleString()}</strong> Due</span>
+                <span className="text-white/60"><strong className="text-[#30D158]">Rs. {netCompanyProfit.toLocaleString()}</strong> Profit</span>
               </div>
               <span className="w-7 h-7 rounded-full bg-white/[0.06] group-hover:bg-[#0A84FF] text-white/70 group-hover:text-white flex items-center justify-center transition">
                 <ChevronRight className="w-4 h-4" />
@@ -669,7 +728,7 @@ export default function App() {
                 {employerCompanies.length} Connected {employerCompanies.length === 1 ? 'Company' : 'Companies'}
               </p>
               <p className="text-[12px] text-white/55 mt-1.5 leading-relaxed">
-                Track tasks assigned to you by companies, check revisions & view earnings.
+                Track tasks assigned to you by companies, check sequence numbers & earnings.
               </p>
             </div>
 
@@ -696,7 +755,7 @@ export default function App() {
                 {profile?.company_name || 'My Orders'}
               </h1>
               <p className="text-[11px] text-white/50">
-                {myActiveOrdersCount} active · Rs. {totalUnpaidToTeam.toLocaleString()} due
+                Profit: <strong className="text-[#30D158]">Rs. {netCompanyProfit.toLocaleString()}</strong> · Due: Rs. {totalUnpaidToTeam.toLocaleString()}
               </p>
             </div>
 
@@ -711,11 +770,18 @@ export default function App() {
           {/* Quick Add Auto-Numbered Order Form */}
           {showQuickAdd && (
             <form onSubmit={handleAddOrder} className="bg-[#1C1C1E] border border-white/10 rounded-[20px] p-3.5 space-y-2.5 animate-ios-pop">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-1">
                 <span className="text-[11px] font-semibold text-white/70">Create Order</span>
-                <span className="text-[11px] bg-[#0A84FF]/15 text-[#0A84FF] px-2.5 py-0.5 rounded-full font-semibold">
-                  {finalGeneratedTitle}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] bg-[#0A84FF]/15 text-[#0A84FF] px-2.5 py-0.5 rounded-full font-semibold">
+                    {finalGeneratedTitle}
+                  </span>
+                  {previewEmployeeOrderCode && (
+                    <span className="text-[11px] bg-[#30D158]/15 text-[#30D158] px-2.5 py-0.5 rounded-full font-semibold">
+                      Emp: {previewEmployeeOrderCode}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <select
@@ -736,7 +802,7 @@ export default function App() {
                 </span>
                 <input
                   type="text"
-                  placeholder="Optional note (e.g. from cv_01)"
+                  placeholder="Optional note (e.g. from CV_102)"
                   value={titleSuffix}
                   onChange={(e) => setTitleSuffix(e.target.value)}
                   className="flex-1 bg-transparent px-3 py-2 text-[13px] text-white placeholder:text-white/35 focus:outline-none"
@@ -812,7 +878,7 @@ export default function App() {
               <Search className="w-3.5 h-3.5 text-white/40 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Search..."
+                placeholder="Search ID, Emp ID or client..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full bg-[#1C1C1E] border border-white/[0.08] rounded-xl pl-8 pr-3 py-1.5 text-[12px] text-white placeholder:text-white/35"
@@ -859,7 +925,9 @@ export default function App() {
                             </span>
                           )}
                           <span className="text-[10px] text-white/50">
-                            {assignee ? `→ ${assignee.name}` : '→ Myself'}
+                            {assignee
+                              ? `→ ${assignee.name}${order.employee_order_code ? ` (${order.employee_order_code})` : ''}`
+                              : '→ Myself'}
                           </span>
                         </div>
                         <h3 className="text-[14px] font-semibold text-white leading-snug">{order.title}</h3>
@@ -882,7 +950,6 @@ export default function App() {
 
                     <div className="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-white/[0.06]">
                       <div className="flex flex-wrap items-center gap-1">
-                        {/* Client Payment Pill: Unpaid -> Half Paid -> Full Paid */}
                         <button
                           onClick={() => cycleClientPaymentStatus(order)}
                           className={`flex items-center gap-0.5 px-2 py-1 rounded-lg text-[10px] font-semibold border ios-press cursor-pointer ${CLIENT_PAYMENT_CONFIG[clientPayKey]?.color}`}
@@ -1015,10 +1082,17 @@ export default function App() {
                           {category.name}
                         </span>
                       )}
+                      {order.employee_order_code && (
+                        <span className="text-[10px] font-medium bg-white/[0.06] text-white/55 px-2 py-0.5 rounded-full">
+                          Ref: {order.title}
+                        </span>
+                      )}
                     </div>
 
                     <div>
-                      <h3 className="text-[14px] font-semibold text-white">{order.title}</h3>
+                      <h3 className="text-[15px] font-bold text-white">
+                        {order.employee_order_code || order.title}
+                      </h3>
                       {order.notes && <p className="text-[11px] text-white/50 italic mt-0.5">“{order.notes}”</p>}
                     </div>
 
@@ -1064,7 +1138,7 @@ export default function App() {
             className="bg-[#1C1C1E] border border-white/15 rounded-[24px] w-full p-4 space-y-3 shadow-2xl animate-ios-pop"
           >
             <h3 className="text-[15px] font-bold text-white">
-              Request Update · {revisionModalOrder.title}
+              Request Update · {revisionModalOrder.employee_order_code || revisionModalOrder.title}
             </h3>
             <textarea
               rows="3"
